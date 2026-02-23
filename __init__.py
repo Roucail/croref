@@ -11,8 +11,8 @@ def get_np_array(image):
     img_id = image.as_pointer()
     
     if img_id not in PIXEL_CACHE:
-        # Note: Cette opération peut prendre 0.5s sur de très grosses images
         w, h = image.size
+        # On charge les pixels originaux (0.0 à 1.0)
         arr = np.array(image.pixels).reshape((h, w, 4))
         PIXEL_CACHE[img_id] = arr
         print(f"[Crop Tool] Cache créé : {image.name}")
@@ -25,11 +25,11 @@ def reset_crop_settings(props):
     props.crop_y = 100.0
     props.pos_x = 50.0
     props.pos_y = 50.0
+    props.use_transparency = False
 
 # --- HANDLER DE SYNCHRONISATION ---
 @bpy.app.handlers.persistent
 def sync_empty_source_handler(scene):
-    """Détecte les changements d'image via l'interface standard de Blender."""
     obj = bpy.context.object
     if not obj or obj.type != 'EMPTY' or obj.empty_display_type != 'IMAGE':
         return
@@ -40,15 +40,13 @@ def sync_empty_source_handler(scene):
     if not current_data:
         return
 
-    # SÉCURITÉ : On n'autorise la synchro QUE si l'image n'est PAS un crop de notre add-on
     if not current_data.name.startswith(PREFIX_NAME):
         if props.source_image != current_data:
             props.source_image = current_data
             reset_crop_settings(props)
-            # On ne vide pas PIXEL_CACHE.clear() ici pour garder les autres images en mémoire
-            print(f"[Crop Tool] Source mise à jour pour {obj.name} -> {current_data.name}")
+            print(f"[Crop Tool] Source mise à jour : {current_data.name}")
 
-# --- LOGIQUE DE CROP ---
+# --- LOGIQUE DE CROP ET TRANSPARENCE ---
 def crop_image_logic(context):
     obj = context.object
     props = obj.simple_crop
@@ -56,26 +54,44 @@ def crop_image_logic(context):
     
     if not orig_img: return
 
-    # 1. Récupération des pixels (via cache)
-    pixels_np = get_np_array(orig_img)
-    if pixels_np is None: return
-    src_h, src_w, _ = pixels_np.shape
+    # 1. Récupération des pixels originaux depuis le cache
+    base_pixels = get_np_array(orig_img)
+    if base_pixels is None: return
+    src_h, src_w, _ = base_pixels.shape
     
-    # 2. Calcul des dimensions
+    # 2. Calcul des dimensions du crop
     crop_w = max(1, int(src_w * (props.crop_x / 100.0)))
     crop_h = max(1, int(src_h * (props.crop_y / 100.0)))
     
     start_x = int((src_w - crop_w) * (props.pos_x / 100.0))
     start_y = int((src_h - crop_h) * (props.pos_y / 100.0))
     
-    # 3. Nommage unique (on nettoie le nom de l'image pour éviter CR_CR_...)
+    # 3. Slicing du rectangle de l'image (copie pour ne pas corrompre le cache)
+    working_pixels = base_pixels[start_y : start_y + crop_h, start_x : start_x + crop_w, :].copy()
+    
+    # 4. Application de la transparence (Chroma Key)
+    if props.use_transparency:
+        # Couleur cible (R, G, B)
+        target_rgb = np.array(props.transparency_color[:3])
+        
+        # Calcul de la distance L1 : Somme des valeurs absolues des différences
+        # working_pixels[:,:,:3] isole RGB, on soustrait la cible, abs() puis somme sur l'axe des couleurs
+        diff = np.abs(working_pixels[:, :, :3] - target_rgb)
+        distance_l1 = np.sum(diff, axis=2)
+        
+        # Création du masque : pixels dont la distance est inférieure au seuil
+        mask = distance_l1 < props.transparency_threshold
+        
+        # On passe l'alpha à 0 pour ces pixels
+        working_pixels[mask, 3] = 0.0
+
+    # 5. Nommage et création du bloc Image Blender
     clean_img_name = orig_img.name
-    if clean_img_name.startswith(PREFIX_NAME+obj.name+"_"):
-        clean_img_name = clean_img_name.replace(PREFIX_NAME+obj.name+"_", "")
+    if clean_img_name.startswith(PREFIX_NAME):
+        clean_img_name = clean_img_name.split("_", 2)[-1] # Nettoyage si déjà préfixé
         
     new_name = f"{PREFIX_NAME}{obj.name}_{clean_img_name}"[:63]
     
-    # 4. Gestion du bloc Image
     if new_name in bpy.data.images:
         new_img = bpy.data.images[new_name]
         if new_img.size[0] != crop_w or new_img.size[1] != crop_h:
@@ -83,51 +99,57 @@ def crop_image_logic(context):
     else:
         new_img = bpy.data.images.new(new_name, width=crop_w, height=crop_h)
 
-    # 5. Application des pixels
-    cropped_array = pixels_np[start_y : start_y + crop_h, start_x : start_x + crop_w, :]
-    new_img.pixels = cropped_array.flatten()
-
-    # 6. Assignation (le handler ignorera cette étape grâce au préfixe CR_)
+    # 6. Mise à jour des pixels et assignation
+    new_img.pixels = working_pixels.flatten()
     obj.data = new_img
     
 def update_crop_callback(self, context):
-    """Callback pour la mise à jour dynamique."""
-    # On vérifie que la source n'est pas elle-même un crop par erreur
+    """Callback déclenché par chaque modification d'UI."""
     if self.source_image and not self.source_image.name.startswith(PREFIX_NAME):
         if self.auto_update:
             crop_image_logic(context)
 
 # --- UI & PROPRIÉTÉS ---
 class SimpleEmptyCropProps(bpy.types.PropertyGroup):
-    # La source pointe vers l'image d'origine
-    source_image: bpy.props.PointerProperty(
-        type=bpy.types.Image, 
-        name="Image Source",
-        description="L'image originale non recadrée"
-    )
+    source_image: bpy.props.PointerProperty(type=bpy.types.Image, name="Image Source")
+    auto_update: bpy.props.BoolProperty(name="Auto", default=True)
     
-    auto_update: bpy.props.BoolProperty(
-        name="Auto", 
-        description="Mise à jour en temps réel",
-        default=True
-    )
-    
+    # Crop
     crop_x: bpy.props.FloatProperty(name="Largeur %", default=100.0, min=1.0, max=100.0, subtype='PERCENTAGE', update=update_crop_callback)
     crop_y: bpy.props.FloatProperty(name="Hauteur %", default=100.0, min=1.0, max=100.0, subtype='PERCENTAGE', update=update_crop_callback)
     pos_x:  bpy.props.FloatProperty(name="Position X %", default=50.0, min=0.0, max=100.0, subtype='PERCENTAGE', update=update_crop_callback)
     pos_y:  bpy.props.FloatProperty(name="Position Y %", default=50.0, min=0.0, max=100.0, subtype='PERCENTAGE', update=update_crop_callback)
+    
+    # Transparence
+    use_transparency: bpy.props.BoolProperty(
+        name="Activer Transparence", 
+        default=False,
+        update=update_crop_callback
+    )
+    transparency_color: bpy.props.FloatVectorProperty(
+        name="Couleur à masquer",
+        subtype='COLOR', # Ceci active l'interface type matériau
+        default=(0.0, 0.0, 0.0),
+        size=3,
+        min=0.0, max=1.0,
+        update=update_crop_callback
+    )
+    transparency_threshold: bpy.props.FloatProperty(
+        name="Seuil (L1)",
+        description="Tolérance de la couleur (0 = exact)",
+        default=0.1, min=0.0, max=3.0,
+        update=update_crop_callback
+    )
 
 class OBJECT_OT_apply_crop(bpy.types.Operator):
     bl_idname = "empty.apply_crop"
-    bl_label = "Recadrer maintenant"
-    bl_description = "Force le calcul du recadrage"
-    
+    bl_label = "Recadrer"
     def execute(self, context):
         crop_image_logic(context)
         return {'FINISHED'}
 
 class DATA_PT_empty_crop_ui(bpy.types.Panel):
-    bl_label = "Crop de Référence"
+    bl_label = "Crop & Transparence"
     bl_space_type = 'PROPERTIES'; bl_region_type = 'WINDOW'; bl_context = "data"
     
     @classmethod
@@ -138,19 +160,30 @@ class DATA_PT_empty_crop_ui(bpy.types.Panel):
         obj = bpy.context.object
         p = obj.simple_crop
         
-        # Affichage de la source actuelle
         self.layout.prop(p, "source_image")
         
         row = self.layout.row(align=True)
-        row.operator("empty.apply_crop")
+        row.operator("empty.apply_crop", icon='IMAGE')
         row.prop(p, "auto_update", text="Auto", toggle=True)
         
-        col = self.layout.column(align=True)
+        # Section Crop
+        box = self.layout.box()
+        box.label(text="Dimensions", icon='PIVOT_MEDIAN')
+        col = box.column(align=True)
         col.prop(p, "crop_x")
         col.prop(p, "crop_y")
         col.separator()
         col.prop(p, "pos_x")
         col.prop(p, "pos_y")
+
+        # Section Transparence
+        box = self.layout.box()
+        box.prop(p, "use_transparency", icon='NODE_INSERT_ON' if p.use_transparency else 'NODE_INSERT_OFF')
+    
+        # L'interface de sélection de couleur
+        box.template_color_picker(p, "transparency_color", value_slider=True)
+        box.prop(p, "transparency_color", text="")
+        box.prop(p, "transparency_threshold", text="Souplesse", slider=True)
 
 # --- REGISTRATION ---
 _classes = (SimpleEmptyCropProps, OBJECT_OT_apply_crop, DATA_PT_empty_crop_ui)
