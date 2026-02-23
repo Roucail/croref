@@ -1,6 +1,6 @@
-schema_version = "1.0.1"
+schema_version = "1.0.2"
 id = "empty_crop_tool"
-version = "1.0.0"
+version = "1.0.2"
 name = "Empty Image Crop"
 tagline = "Recadrage pour Empty Image via pourcentages"
 maintainer = "Kwyk"
