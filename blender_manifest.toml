@@ -1,8 +1,8 @@
-schema_version = "1.0.0"
+schema_version = "1.0.1"
 id = "empty_crop_tool"
 version = "1.0.0"
 name = "Empty Image Crop"
-tagline = "Recadrage haute performance pour Empties Image via pourcentages"
+tagline = "Recadrage pour Empty Image via pourcentages"
 maintainer = "Kwyk"
 type = "add-on"
 # Changement pour une licence libre (GPL v3)
