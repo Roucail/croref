@@ -3,19 +3,29 @@ import numpy as np
 
 # --- CONFIGURATION ---
 PIXEL_CACHE = {}
+IMAGE2CACHE = {}
 PREFIX_NAME = "CR_"
 
 def get_np_array(image):
-    """Gère le cache et la conversion vers NumPy."""
+    """Gère le cache avec une méthode de transfert ultra-rapide."""
     if not image: return None
     img_id = image.as_pointer()
+    if img_id not in IMAGE2CACHE.keys():
+        return
     
     if img_id not in PIXEL_CACHE:
         w, h = image.size
-        # On charge les pixels originaux (0.0 à 1.0)
-        arr = np.array(image.pixels).reshape((h, w, 4))
-        PIXEL_CACHE[img_id] = arr
-        print(f"[Crop Tool] Cache créé : {image.name}")
+        # 1. On pré-alloue un tableau NumPy vide de la bonne taille (très rapide)
+        # On utilise float32 car Blender stocke les pixels en flottants
+        arr = np.empty(w * h * 4, dtype=np.float32)
+        
+        # 2. On COPIE les données directement du buffer C vers NumPy
+        # C'est cette méthode qui évite la création de la liste Python lente
+        image.pixels.foreach_get(arr)
+        
+        # 3. On redimensionne le tableau
+        PIXEL_CACHE[img_id] = arr.reshape((h, w, 4))
+        print(f"[Crop Tool] Cache créé instantanément : {image.name}")
     
     return PIXEL_CACHE[img_id]
 
@@ -68,9 +78,10 @@ def crop_image_logic(context):
     
     # 3. Slicing du rectangle de l'image (copie pour ne pas corrompre le cache)
     working_pixels = base_pixels[start_y : start_y + crop_h, start_x : start_x + crop_w, :].copy()
-    
+    print("gerpij")
     # 4. Application de la transparence (Chroma Key)
     if props.use_transparency:
+        print("gerpijREZ Y4ART Y")
         # Couleur cible (R, G, B)
         target_rgb = np.array(props.transparency_color[:3])
         
@@ -145,6 +156,13 @@ class OBJECT_OT_apply_crop(bpy.types.Operator):
     bl_idname = "empty.apply_crop"
     bl_label = "Recadrer"
     def execute(self, context):
+        obj = context.object
+        props = obj.simple_crop
+        orig_img = props.source_image  
+        img_id = orig_img.as_pointer()      
+        if img_id not in IMAGE2CACHE: 
+            IMAGE2CACHE[img_id] = 1
+        
         crop_image_logic(context)
         return {'FINISHED'}
 
@@ -201,7 +219,7 @@ def unregister():
         bpy.utils.unregister_class(cls)
     del bpy.types.Object.simple_crop
     PIXEL_CACHE.clear()
-    PREFIX_NAME.clear()
+    IMAGE2CACHE.clear()
 
 if __name__ == "__main__":
     register()
