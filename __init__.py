@@ -201,6 +201,7 @@ def unregister():
         bpy.utils.unregister_class(cls)
     del bpy.types.Object.simple_crop
     PIXEL_CACHE.clear()
+    PREFIX_NAME.clear()
 
 if __name__ == "__main__":
     register()
